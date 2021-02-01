@@ -1,9 +1,8 @@
 import numpy as np
-import torch
 import torch.nn as nn
 
-from utils import calculate_ious
-from rpn_utils import anchor_box_generator
+from utils.util import calculate_ious
+from utils.rpn_util import anchor_box_generator
 
 
 class RPN(nn.Module):

@@ -154,7 +154,7 @@ def pad_2dim(x, ref_size):
 
 def calculate_iou(box1, box2):
     # Inputs:
-    #    box1, box2: [y1, x1, y2, x2] tensor
+    #    box1, box2: tensor [y1, x1, y2, x2]
 
     y1_inter = torch.max(box1[0], box2[0])
     x1_inter = torch.max(box1[1], box2[1])

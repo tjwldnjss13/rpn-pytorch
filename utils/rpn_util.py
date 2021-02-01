@@ -1,8 +1,7 @@
 import numpy as np
-import torch
 
-from utils import calculate_ious
-from pytorch_utils import calculate_iou
+from utils.util import calculate_ious
+from pytorch_util import calculate_iou
 
 
 def anchor_generator(feature_size, anchor_stride):
@@ -10,7 +9,7 @@ def anchor_generator(feature_size, anchor_stride):
     #    feature_size: (h, w)
     #    anchor_stride: Int
     # Outputs:
-    #    anchors: numpy array [, (cy, cx)]
+    #    anchors: numpy array [-1, (cy, cx)]
 
     h_f, w_f = feature_size
     xs_ctr = np.arange(anchor_stride, (w_f + 1) * anchor_stride, anchor_stride)
@@ -21,8 +20,8 @@ def anchor_generator(feature_size, anchor_stride):
     c_i = 0
     for x in xs_ctr:
         for y in ys_ctr:
-            anchors[c_i, 1] = x - w_f // 2
-            anchors[c_i, 0] = y - h_f // 2
+            anchors[c_i, 1] = x - anchor_stride // 2
+            anchors[c_i, 0] = y - anchor_stride // 2
             c_i += 1
 
     print('Anchors generated')
@@ -49,10 +48,18 @@ def anchor_box_generator(ratios, scales, input_size, anchor_stride):
             for s in scales:
                 # h = anchor_stride * s * np.sqrt(r)
                 # w = anchor_stride * s * np.sqrt(1. / r)
+
+                # if r < 1:
+                #     h, w = s, s * (1. / r)
+                # elif r > 1:
+                #     h, w = s * (1. / r), s
+                # else:
+                #     h, w = s, s
+
                 if r < 1:
-                    h, w = s, s * (1. / r)
+                    h, w = s / r, s
                 elif r > 1:
-                    h, w = s * (1. / r), s
+                    h, w = s, s * r
                 else:
                     h, w = s, s
 
@@ -60,6 +67,11 @@ def anchor_box_generator(ratios, scales, input_size, anchor_stride):
                 anchor_boxes[anc_i, 1] = anc_x - .5 * w
                 anchor_boxes[anc_i, 2] = anc_y + .5 * h
                 anchor_boxes[anc_i, 3] = anc_x + .5 * w
+
+                # anchor_boxes[anc_i, 0] = anc_y
+                # anchor_boxes[anc_i, 1] = anc_x
+                # anchor_boxes[anc_i, 2] = h
+                # anchor_boxes[anc_i, 3] = w
 
                 anc_i += 1
 
@@ -72,6 +84,14 @@ def anchor_box_generator(ratios, scales, input_size, anchor_stride):
     print('Anchor boxes generated')
 
     return anchor_boxes
+
+
+import torch
+anc_boxes = anchor_box_generator([.5, 1, 2], [32, 64, 128], (224, 224), 16)
+anc_boxes = torch.as_tensor(anc_boxes)
+anc_boxes = anc_boxes.reshape(14, 14, 36)
+# anc_boxes = anc_boxes.permute(2, 0, 1)
+print(anc_boxes[:10, 0, 0])
 
 
 def anchor_boxes_generator_categorical(anchor_boxes, ground_truth):
@@ -170,25 +190,63 @@ def loc_delta_generator(bbox, anchor_box):
 
 def non_maximum_suppression(bbox, score, threshold=.5):
     # Inputs:
-    #    bbox: tensor [-1, (y1, x1, y2, x2)]
-    #    score: tensor [n]
+    #    bbox: tensor [num_batch, -1, (y1, x1, y2, x2)]
+    #    score: tensor [num_batch, n]
     #    threshold: Float
     # Outputs:
-    #    bbox_nms: tensor [-1, (y1, x1, y2, x2)]
-    #    score_nms: tensor [n]
+    #    bbox_nms: tensor [num_batch, -1, (y1, x1, y2, x2)]
+    #    score_nms: tensor [num_batch, n]
 
     keep = torch.ones(score.shape)
     v, idx = score.sort(descending=True)
     bbox_base = bbox[idx[0]]
 
-    for i in range(1, len(idx)):
-        bbox_temp = bbox[idx[i]]
-        iou = calculate_iou(bbox_base, bbox_temp)
-        if iou > threshold:
-            keep[i] = 0
+    for b in range(bbox.shape[0]):
+        for i in range(1, len(idx)):
+            bbox_temp = bbox[idx[i]]
+            iou = calculate_iou(bbox_base, bbox_temp)
+            if iou > threshold:
+                keep[i] = 0
 
     return bbox * keep.reshape(len(keep), -1), score * keep
 
+
+def generate_rpn_target(bboxes, scores, anchor_boxes, image_size, in_size, out_size):
+    # Inputs:
+    #    bboxes: tensor [-1, (y1, x1, y2, x2)]
+    #    scores: tensor [-1, (no obj score, obj score)]
+    #    anchor_boxes: tensor [output height, output width, 4 * 9]
+    #    image_size: (depth, image height, image width)
+    #    in_size: (input height, input width)
+    #    out_size: (output height, output width)
+
+    target_bbox = torch.zeros(anchor_boxes.shape)
+    ratio_h, ratio_w = in_size[0] / image_size[1], in_size[1] / image_size[2]
+
+    for bbox in bboxes:
+        y1, x1, y2, x2 = bbox
+        y1, x1, y2, x2 = y1 * ratio_h, x1 * ratio_w, y2 * ratio_h, x2 * ratio_w
+        cy, cx = (y1 + y2) / 2, (x1 + x2) / 2
+        h, w = y2 - y1, x2 - x1
+        cy_idx, cx_idx = (cy * out_size[0] / in_size[0]).int(), (cx * out_size[1] / in_size[1]).int()
+        bbox_tensor = torch.Tensor([cy, cx, h, w])
+
+        idx_max = 0
+        iou_max = 0
+        for i in range(9):
+            iou_temp = calculate_iou(bbox_tensor, anchor_boxes[cy_idx, cx_idx, 4 * i:4 * (i + 1)])
+            if iou_temp > iou_max:
+                idx_max = i
+                iou_max = iou_temp
+
+        target_bbox[cy, cx, 4 * idx_max:4 * (idx_max + 1)] = bbox_tensor
+
+
+
+
+
+
+    
 
 
 
