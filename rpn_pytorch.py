@@ -1,8 +1,9 @@
+import torch
 import numpy as np
 import torch.nn as nn
 
 from utils.util import calculate_ious
-from utils.rpn_util import anchor_box_generator
+from utils.rpn_util import generate_anchor_box
 
 
 class RPN(nn.Module):
@@ -12,17 +13,22 @@ class RPN(nn.Module):
         self.out_dim = out_dim
         self.in_size = in_size
         self.conv = nn.Conv2d(in_dim, out_dim, 3, 1, 1)
-        self.conv.weight.data.normal_(0, .01)
-        self.conv.bias.data.zero_()
+        # self.conv.weight.data.normal_(0, .01)
+        # self.conv.bias.data.zero_()
         self.reg_layer = nn.Conv2d(out_dim, n_anchor * 4, 1, 1, 0)
-        # self.reg_layer = nn.Linear(out_dim * self.in_size[0] * in_size[1], n_anchor * 4)
-        self.reg_layer.weight.data.normal_(0, .01)
-        self.reg_layer.bias.data.zero_()
+        # self.reg_layer.weight.data.normal_(0, .01)
+        # self.reg_layer.bias.data.zero_()
         self.cls_layer = nn.Conv2d(out_dim, n_anchor * 2, 1, 1, 0)
-        # self.cls_layer = nn.Linear(out_dim * self.in_size[0] * self.in_size[1], n_anchor * 2)
-        self.cls_layer.weight.data.normal_(0, .01)
-        self.cls_layer.bias.data.zero_()
+        # self.cls_layer.weight.data.normal_(0, .01)
+        # self.cls_layer.bias.data.zero_()
         self.softmax = nn.Softmax(dim=2)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        torch.nn.init.kaiming_uniform(self.conv.weight)
+        torch.nn.init.kaiming_uniform(self.reg_layer.weight)
+        torch.nn.init.kaiming_uniform(self.cls_layer.weight)
 
     def forward(self, x):
         x = self.conv(x)
@@ -50,7 +56,7 @@ if __name__ == '__main__':
     ratios = [.5, 1, 2]
     scales = [128, 256, 512]
     in_size = (600, 1000)
-    anchor_boxes = anchor_box_generator(ratios, scales, in_size, 16)
+    anchor_boxes = generate_anchor_box(ratios, scales, in_size, 16)
 
     img_pth = 'sample/dogs.jpg'
     img = cv.imread(img_pth)

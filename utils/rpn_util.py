@@ -217,15 +217,18 @@ def non_maximum_suppression(bbox, score, threshold=.5):
             if iou > threshold:
                 keep[i] = 0
 
-    return bbox * keep.reshape(len(keep), -1), score * keep
+    bbox_nms = bbox * keep.reshape(len(keep), -1)
+    score_nms = score * keep
+
+    return bbox_nms, score_nms
 
 
-def generate_rpn_target(predict_bboxes, ground_truth, anchor_boxes, image_size, in_size, out_size):
+def generate_rpn_target(predict_bboxes, ground_truth, anchor_boxes, image_size, in_size, out_size, valid_mask):
     # Inputs:
     #    predict_bboxes: tensor [-1, (y1, x1, y2, x2)]
     #    predict_scores: tensor [-1, (no obj score, obj score)]
     #    anchor_boxes: tensor [output height, output width, 4 * 9] or [-1, (y1, x1, y2, x2)] (currently later)
-    #    ground_truth: tensor [the number of bounding box, 4]
+    #    ground_truth: tensor [# of ground truth bounding box, 4]
     #    image_size: (depth, image height, image width)
     #    in_size: (input height, input width)
     #    out_size: (output height, output width)
@@ -250,6 +253,9 @@ def generate_rpn_target(predict_bboxes, ground_truth, anchor_boxes, image_size, 
 
     # Make target bounding box tensor
     for i, bbox in enumerate(predict_bboxes):
+        if valid_mask[i] == 0:
+            continue
+
         pred_y1, pred_x1, pred_y2, pred_x2 = bbox
 
         ious_gt_anc = torch.zeros(3)
@@ -284,7 +290,7 @@ def generate_rpn_mini_batch(anchor_boxes, anchor_box_label, num_positive, num_ne
 
     positive_mask = (anchor_box_label == 1)
     negative_mask = (anchor_box_label == 0)
-    
+
 
 
 
@@ -292,9 +298,16 @@ def generate_rpn_mini_batch(anchor_boxes, anchor_box_label, num_positive, num_ne
 
 import torch
 anc_boxes, valid_mask = generate_anchor_box([.5, 1, 2], [32, 64, 128], (224, 224), 16)
-anc_boxes = torch.as_tensor(anc_boxes * valid_mask.unsqueeze(1))
-anc_boxes = anc_boxes.reshape(14, 14, 36)
+print(anc_boxes.shape, valid_mask.shape)
+idx_valid = torch.nonzero((valid_mask == 1), as_tuple=False)
+valid_anc_boxes = anc_boxes[idx_valid]
+# anc_boxes = torch.as_tensor(anc_boxes * valid_mask.unsqueeze(1))
+# anc_boxes = anc_boxes.reshape(14, 14, 36)
 # anc_boxes = anc_boxes.permute(2, 0, 1)
+
+dummy = torch.Tensor(14 * 14 * 36, 4)
+gt = torch.Tensor(2, 4)
+a = generate_rpn_target(dummy, gt, anc_boxes, (3, 300, 400), (224, 224), (14, 14), valid_mask)
 
 lin = anc_boxes.reshape(-1)
 a = lin.reshape(14, 14, 36)
