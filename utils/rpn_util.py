@@ -1,10 +1,10 @@
 import numpy as np
 
 from utils.util import calculate_ious
-from pytorch_util import calculate_iou
+from utils.pytorch_util import calculate_iou
 
 
-def anchor_generator(feature_size, anchor_stride):
+def generate_anchor(feature_size, anchor_stride):
     # Inputs:
     #    feature_size: (h, w)
     #    anchor_stride: Int
@@ -29,17 +29,26 @@ def anchor_generator(feature_size, anchor_stride):
     return anchors
 
 
-def anchor_box_generator(ratios, scales, input_size, anchor_stride):
+def generate_anchor_box(ratios, scales, input_size, anchor_stride):
+    # Inputs:
+    #    ratios: list
+    #    sclaes: list
+    #    input_size: (height, width)
+    #    anchor_stride: int
+    # Outputs:
+    #    anchor_boxes: tensor [the number of anchor boxes, (y1, x1, y2, x2)]
+    #    valid_mask: tensor [the number of anchor boxes]
+
     # 50 = 800 // 16
 
     # ratios = [.5, 1, 2]
     # scales = [128, 256, 512]
 
-    in_h, in_w = input_size[0], input_size[1]
+    in_h, in_w = input_size
 
     feat_h, feat_w = in_h // anchor_stride, in_w // anchor_stride
-    anchors = anchor_generator((feat_h, feat_w), anchor_stride)
-    anchor_boxes = np.zeros((len(anchors) * len(ratios) * len(scales), 4))
+    anchors = generate_anchor((feat_h, feat_w), anchor_stride)
+    anchor_boxes = torch.zeros((len(anchors) * len(ratios) * len(scales), 4))
 
     anc_i = 0
     for anc in anchors:
@@ -75,6 +84,14 @@ def anchor_box_generator(ratios, scales, input_size, anchor_stride):
 
                 anc_i += 1
 
+    valid_mask_1 = (anchor_boxes[:, 0] >= 0)
+    valid_mask_2 = (anchor_boxes[:, 1] >= 0)
+    valid_mask_3 = (anchor_boxes[:, 2] <= input_size[0])
+    valid_mask_4 = (anchor_boxes[:, 3] <= input_size[1])
+
+    valid_mask = valid_mask_1 * valid_mask_2 * valid_mask_3 * valid_mask_4
+    valid_mask = torch.as_tensor(valid_mask)
+
     # idx_valid = np.where((anchor_boxes[:, 0] >= 0) &
     #                      (anchor_boxes[:, 1] >= 0) &
     #                      (anchor_boxes[:, 2] <= in_h) &
@@ -83,18 +100,10 @@ def anchor_box_generator(ratios, scales, input_size, anchor_stride):
 
     print('Anchor boxes generated')
 
-    return anchor_boxes
+    return anchor_boxes, valid_mask
 
 
-import torch
-anc_boxes = anchor_box_generator([.5, 1, 2], [32, 64, 128], (224, 224), 16)
-anc_boxes = torch.as_tensor(anc_boxes)
-anc_boxes = anc_boxes.reshape(14, 14, 36)
-# anc_boxes = anc_boxes.permute(2, 0, 1)
-print(anc_boxes[:10, 0, 0])
-
-
-def anchor_boxes_generator_categorical(anchor_boxes, ground_truth):
+def generate_anchor_box_categorical(anchor_boxes, ground_truth):
     n_gt = ground_truth.shape[0]
     ious_anc_gt = calculate_ious(anchor_boxes, ground_truth)
     argmax_iou_anc_gt = np.argmax(ious_anc_gt, axis=1)
@@ -114,7 +123,7 @@ def anchor_boxes_generator_categorical(anchor_boxes, ground_truth):
     return anchor_boxes_cat
 
 
-def anchor_label_generator(anchor_boxes, ground_truth, pos_threshold, neg_threshold):
+def generate_anchor_label(anchor_boxes, ground_truth, pos_threshold, neg_threshold):
     ious_anc_gt = calculate_ious(anchor_boxes, ground_truth)
 
     pos_args_ious_anc_gt_1 = np.argmax(ious_anc_gt, axis=0)
@@ -143,7 +152,7 @@ def anchor_label_generator(anchor_boxes, ground_truth, pos_threshold, neg_thresh
     return anchor_labels
 
 
-def anchor_label_generatgor_2dim(anchor_labels):
+def generate_anchor_label_2dim(anchor_labels):
     anchor_labels2 = np.zeros((anchor_labels.shape[0], 2))
     train_args = np.where(anchor_labels != -1)
     anchor_labels2[train_args, anchor_labels[train_args]] = 1
@@ -153,7 +162,7 @@ def anchor_label_generatgor_2dim(anchor_labels):
     return anchor_labels2
 
 
-def anchor_ground_truth_generator(anchor_boxes, ground_truth):
+def generate_anchor_ground_truth(anchor_boxes, ground_truth):
     ious_anc_gt = calculate_ious(anchor_boxes, ground_truth)
     argmax_iou_anc_gt = np.argmax(ious_anc_gt, axis=1)
 
@@ -164,7 +173,7 @@ def anchor_ground_truth_generator(anchor_boxes, ground_truth):
     return anchor_gts
 
 
-def loc_delta_generator(bbox, anchor_box):
+def calculate_location_delta(bbox, anchor_box):
     # Inputs:
     #    bbox: tensor [-1, (y1, x1, y2, x2)]
     #    anchor_box: tensor [-1, (y1, x1, y2, x2)]
@@ -211,35 +220,85 @@ def non_maximum_suppression(bbox, score, threshold=.5):
     return bbox * keep.reshape(len(keep), -1), score * keep
 
 
-def generate_rpn_target(bboxes, scores, anchor_boxes, image_size, in_size, out_size):
+def generate_rpn_target(predict_bboxes, ground_truth, anchor_boxes, image_size, in_size, out_size):
     # Inputs:
-    #    bboxes: tensor [-1, (y1, x1, y2, x2)]
-    #    scores: tensor [-1, (no obj score, obj score)]
-    #    anchor_boxes: tensor [output height, output width, 4 * 9]
+    #    predict_bboxes: tensor [-1, (y1, x1, y2, x2)]
+    #    predict_scores: tensor [-1, (no obj score, obj score)]
+    #    anchor_boxes: tensor [output height, output width, 4 * 9] or [-1, (y1, x1, y2, x2)] (currently later)
+    #    ground_truth: tensor [the number of bounding box, 4]
     #    image_size: (depth, image height, image width)
     #    in_size: (input height, input width)
     #    out_size: (output height, output width)
+    # Outputs:
+    #    pred_ds: tensor [-1, (dy, dx, dh, dw)]
+    #    target_ds: tensor [-1, (dy, dx, dh, dw)]
+    #    target_prob: tensor [-1, p] (p==1: positive, p==0: negative, p==-1: non-train)
 
-    target_bbox = torch.zeros(anchor_boxes.shape)
-    ratio_h, ratio_w = in_size[0] / image_size[1], in_size[1] / image_size[2]
+    assert predict_bboxes.shape == anchor_boxes.shape
+    assert len(predict_bboxes) == len(anchor_boxes)
 
-    for bbox in bboxes:
-        y1, x1, y2, x2 = bbox
-        y1, x1, y2, x2 = y1 * ratio_h, x1 * ratio_w, y2 * ratio_h, x2 * ratio_w
-        cy, cx = (y1 + y2) / 2, (x1 + x2) / 2
-        h, w = y2 - y1, x2 - x1
-        cy_idx, cx_idx = (cy * out_size[0] / in_size[0]).int(), (cx * out_size[1] / in_size[1]).int()
-        bbox_tensor = torch.Tensor([cy, cx, h, w])
+    # Define variables
+    num_bboxes = len(anchor_boxes)
+    num_ground_truth = len(ground_truth)
 
-        idx_max = 0
-        iou_max = 0
-        for i in range(9):
-            iou_temp = calculate_iou(bbox_tensor, anchor_boxes[cy_idx, cx_idx, 4 * i:4 * (i + 1)])
-            if iou_temp > iou_max:
-                idx_max = i
-                iou_max = iou_temp
+    # Define tensors
+    target_bboxes = torch.zeros(anchor_boxes.shape)
+    target_prob = -1 * torch.ones(num_bboxes)
 
-        target_bbox[cy, cx, 4 * idx_max:4 * (idx_max + 1)] = bbox_tensor
+    # Calculate prediction delta vectors (dy, dx, dh, dw)
+    pred_ds = calculate_location_delta(predict_bboxes, anchor_boxes)
+
+    # Make target bounding box tensor
+    for i, bbox in enumerate(predict_bboxes):
+        pred_y1, pred_x1, pred_y2, pred_x2 = bbox
+
+        ious_gt_anc = torch.zeros(3)
+        for j, gt in enumerate(ground_truth):
+            iou_temp = calculate_iou(bbox, gt)
+            ious_gt_anc[j] = iou_temp
+
+        # Assign maximum-iou ground truth box to target bounding box tensor
+        idx_gt_iou_max = ious_gt_anc.argmax()
+        target_bboxes[i] = ground_truth[idx_gt_iou_max]
+
+        # Assign positive label
+        if True in (ious_gt_anc > .7):
+            target_prob[i] = 1
+
+        # Assign negative label
+        if (ious_gt_anc < .3).sum().item() == num_ground_truth:
+            target_prob[i] = -1
+
+    # Calculate target delta vectors (*dy, *dx, *dh, *dw)
+    target_ds = calculate_location_delta(target_bboxes, anchor_boxes)
+
+    return pred_ds, target_ds, target_prob
+
+
+def generate_rpn_mini_batch(anchor_boxes, anchor_box_label, num_positive, num_negative):
+    # Inputs:
+    #    anchor_boxes: tensor [# of anchor boxes, (y1, x1, y2, x2)]
+    #    anchor_box_label: tensor [# of anchor_boxes, integer label(1: positive, 0: negative, -1: no train)]
+    #    num_positive: int
+    #    num_negative: int
+
+    positive_mask = (anchor_box_label == 1)
+    negative_mask = (anchor_box_label == 0)
+    
+
+
+
+
+
+import torch
+anc_boxes, valid_mask = generate_anchor_box([.5, 1, 2], [32, 64, 128], (224, 224), 16)
+anc_boxes = torch.as_tensor(anc_boxes * valid_mask.unsqueeze(1))
+anc_boxes = anc_boxes.reshape(14, 14, 36)
+# anc_boxes = anc_boxes.permute(2, 0, 1)
+
+lin = anc_boxes.reshape(-1)
+a = lin.reshape(14, 14, 36)
+
 
 
 
